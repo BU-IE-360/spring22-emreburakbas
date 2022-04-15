@@ -1,0 +1,148 @@
+---
+title: "R Notebook"
+output: html_notebook
+author: "Emre Burak Baş - 2018402096"
+editor_options: 
+  chunk_output_type: inline
+---
+
+In this study, I wanted to focus on prices. Since price levels not only affect but also get affected by a lot of different factors, I checked the correlations between some general important macroeconomic indicators and price levels. For price levels, I used consumer price index and cost of living index. In addition to these, Google search frequencies of some keywords are also considered. I used monthly observations from the beginning of 2015 to the end of 2020. I tried to utilize tidyverse and compatible packages as much as possible, because I like the way these packages make the R syntax more readable and enjoyable.
+
+```{r}
+library("tidyverse")
+library("readxl")
+library("tsibble")
+library("GGally")
+```
+
+This .xlsx file is downloaded from EVDS (Elektronik Veri Dağıtım Sistemi) of the Central Bank of Turkey.
+The data includes following variables:
+
+- Total (Credit + Debit) Card Expenditures from FINANCIAL STATISTICS category
+- Industrial Production Index from PRODUCTION STATISTICS category
+- Unemployment Rate from EMPLOYMENT STATISTICS category
+- Gold Buying Price from GOLD STATISTICS category
+- Total Trade Volume of BIST - Borsa Istanbul from MARKET STATISTICS category
+- USD / TRY Currency Rate from EXCHANGE RATES category
+- Interest Rate for Loans from INTEREST RATES category
+- Interest Rate for Deposit Accounts from INTEREST RATES category
+- Consumer Price Index from PRICE INDICES category
+- Cost of Living Index from PRICE INDICES category
+- Residential Price Index HOUSING AND CONSTRUCTION STATISTICS category
+
+I used read_excel() function to read the .xlsx file after I made some edits to the first sheet of this file to make it more easily readable for this function. This function returns a "tibble", which is like the tidyverse version of data.frame's.
+
+```{r}
+data <- read_excel("EVDS.xlsx", "EVDS_edited")
+summary(data)
+```
+Initially, the column names had spaces inside them, so first rename_with() function substitues spaces with "_", and changes all of them from uppercase to lowercase. Then, I changed the column names and made them much more clear to understand.
+
+```{r}
+data <- data %>% 
+  rename_with(~ tolower(gsub(" ", "_", .x, fixed = TRUE))) %>% 
+  rename(
+    tot_card_exp = tp_kkhartut_kt1,
+    indus_prod_ind = tp_sanayrev4_y1,
+    unemp_rate = tp_yisgucu2_g4,
+    gold = tp_mk_cum_ytl,
+    bist_vol = tp_mk_isl_hc,
+    usd_rate = tp_dk_usd_a_ytl,
+    int_rate_loan = tp_ktf10,
+    int_rate_depo = tp_try_mt06, 
+    cons_pr_ind = tp_fg_j0, 
+    cost_liv_ind = tp_fg_b01_95, 
+    res_pr_ind = tp_hkfe01
+  )
+
+tail(data)
+```
+
+I also incorporated some Google search frequency trends. I chose:
+
+- "bim"
+- "a101"
+- "fiyatlari"
+
+First two are major supermarket chains of Turkey, known for their affordable price levels. I hypothesized that as the prices of casual products such as food and hygiene products increase, people prefer more to shop from these supermarkets rather than other ones, and search for them more on Google.
+
+```{r}
+bim <- read_csv("bim.csv") %>% rename(date = Month)
+head(bim)
+```
+
+```{r}
+a101 <- read_csv("a101.csv") %>% rename(date = Month)
+head(a101)
+```
+
+"fiyatlari" is also another keyword that I was interested in. Since Google searches the input words one by one, I thought that looking the search frequency trend of this word could yield relevant results. Because people who are under the pressure of rising prices may do their Google search queries like "ev fiyatlari", "araba fiyatlari", "yağ fiyatlari", the frequency of the searches including the word "fiyatlari" also increases.
+
+```{r}
+fiyatlari <- read_csv("fiyatlari.csv") %>% rename(date = Month)
+head(fiyatlari)
+```
+
+I used left_join function of dplyr, which is the main data manipulation package of tidyverse. Left join function calls below add the "bim", "a101", "fiyatlari" columns to "data" tibble, by matching them on "date" columns.
+
+```{r}
+data <- data %>% 
+  left_join(bim, by="date") %>% 
+  left_join(a101, by="date") %>%
+  left_join(fiyatlari, by="date")
+            
+head(data)
+```
+
+Before turning the tibble into time series object, I wanted to turn "string" type date column into "date" type date column.
+
+```{r}
+library("lubridate")
+data <- data %>% 
+  mutate(
+    date = ym(date)
+  )
+
+head(data)
+```
+
+I used "tsibble" package to create time series object, because it is more compatible with other tidyverse packages than "xts" package.
+
+```{r}
+data_ts <- as_tsibble(data)
+head(data_ts)
+```
+
+As we can see from the plots below, prices almost always increased between 2015 and 2020.
+
+```{r}
+data_ts %>%
+  ggplot(aes(x=date)) + 
+  geom_line(aes(y=cons_pr_ind), color="red") +
+  xlab("Date") +
+  ylab("Consumer Price Index")
+```
+
+```{r}
+data_ts %>%
+  ggplot(aes(x=date)) + 
+  geom_line(aes(y=cost_liv_ind), color="blue") +
+  xlab("Date") +
+  ylab("Cost of Living Index")
+```
+
+Using ggpairs() to check correlations between variables:
+
+```{r, results='hide', fig.keep='all'}
+data_ts %>% 
+  ggpairs()
+```
+
+Using ggcorr() to check correlation matrix:
+
+```{r}
+data_ts %>%
+  ggcorr()
+```
+
+After checking correlation matrices and several visualizations, Consumer Price Index and Cost of Living Index is highly correlated with most of the variables used in this study, except for interest rates, and maybe industrial production index. So, these variables are suitable be used in further more complex studies.
