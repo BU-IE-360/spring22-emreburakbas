@@ -1,0 +1,238 @@
+---
+title: "IE360 HW2"
+output: html_notebook
+author: "Emre Burak Baş - 2018402096"
+editor_options: 
+  chunk_output_type: inline
+---
+
+# 1. Introduction
+
+The aim of this study is to build a time series regression model in order to find most probable factors affecting the unleaded gas sales and to be able to predict future values of unleaded gas sales.
+
+
+# 2. Pre-Analysis Steps
+## 2.1. Importing Necessary Packages
+
+```{r}
+library("tidyverse")
+library("skimr")
+library("tsibble")
+library("forecast")
+library("GGally")
+```
+
+## 2.2. Reading the Data and Taking the First Look
+
+```{r}
+data <- read_csv("IE360_Spring22_HW2_data.csv")
+data %>% slice_head(n=5)
+```
+
+> UGS: Unleaded gasoline sale in a given quarter,  
+RNUV: An index indicating the rate of new unleaded gasoline using vehicles being added to the traffic in a quarter,  
+PU: Average price (adjusted with an index) of a liter of unleaded gasoline in a quarter,  
+PG: Average price (adjusted with an index) of a liter of diesel gasoline in a quarter,  
+NUGV: Number of unleaded gasoline using vehicles in the traffic,  
+NDGV: Number of diesel gasoline using vehicles in the traffic (per 1000 people),  
+GNPA: Agriculture component of Gross National Product (adjusted with an index),  
+GNPC: Commerce component of Gross National Product (adjusted with an index),  
+GNP: Grand total for GNP (agriculture, commerce and other components total).
+
+## 2.3. Initial Data Manipulations
+
+To start with, I renamed the columns to turn them into short acronyms.
+
+```{r}
+data <- data %>% 
+  rename_with(~ tolower(gsub(" ", "_", .x, fixed = TRUE))) %>% 
+  rename(
+    ugs = "unleaded_gasoline_sale_(ugs)",
+    nlpg = "#_lpg_vehicles_(nlpg)",
+    pu = "price_of_unleaded_gasoline_(pu)",
+    pg = "price_of_diesel_gasoline_(pg)",
+    nugv = "#_unleaded_gasoline_vehicles_(nugv)",
+    ndgv = "#_of_diesel_gasoline_vehicles_(ndgv)"
+  ) 
+
+data %>% slice_head(n=5)
+```
+
+Also, some columns such as "nlpg" and "nugv" is stored in string format since they have whitespace inside these. So, I got rid of those and turned these columns into integers.
+
+```{r}
+data <- data %>% 
+  mutate(
+    ugs = as.integer(str_remove_all(ugs, " ")),
+    nlpg = as.integer(str_remove_all(nlpg, " ")),
+    nugv = as.integer(str_remove_all(nugv, " ")),
+    gnp_agriculture = as.integer(str_remove_all(gnp_agriculture, " ")),
+    gnp_commerce = as.integer(str_remove_all(gnp_commerce, " ")),
+    gnp_total = as.integer(str_remove_all(gnp_total, " ")),
+  )
+
+data %>% slice_head(n=5)
+```
+
+"quarter" column is also currently stored in string format, so I turned it into "yearquarter" data format, provided by "tsibble" package, used for tidyverse-compatible time series objects.
+
+```{r}
+data <- data %>% 
+  mutate(
+    yearquarter = yearquarter(quarter)
+  )
+
+data %>% slice_head(n=5)
+```
+
+## 2.4. Summarizing the Data
+
+```{r}
+skim(data)
+```
+
+Looking at the output above, we can see that, except 4 rows, no data is missing. These 4 rows are already the "test" part of the data and the only column that is missing is the output variable "ugs".
+
+# 3. Analysis Steps before Regression
+
+## 3.1 Plotting the Time Series
+
+```{r}
+data %>% 
+  filter(!is.na(ugs)) %>% 
+  ggplot(aes(x=yearquarter, y=ugs)) + geom_line() + geom_point()
+```
+
+According to the line plot of the non-null values of "ugs" against the quarterly time points, the time series does not seem to be stationary with respect to its mean, because it can be seen that there is a general trend of decreasing. Additionally, seasonality effect is visible. At each year, first quarters are the least levels of ugs, and third quarters are the highest. However, the variance seems to be stable according to the plot, looking at the differences between peak and trough points.
+
+## 3.2. Autocorrelation Function of UGS
+
+```{r}
+data %>% 
+  filter(!is.na(ugs)) %>% 
+  select(ugs) %>% 
+  acf()
+```
+
+Looking at the autocorrelation plot above, except 0 and 1, the lag levels that resulted in the highest autocorrelations are 4 and 8. Also, 6, 10 and 14 lags are also high on the negative side. The fact that these lags have 4 difference supports the seasonality observation above that changes in each 4 quarters of every year shows similar patterns.
+
+## 3.3. Pairs Plot
+
+```{r, results='hide', fig.keep='all'}
+data %>% 
+  select(-c(quarter, yearquarter)) %>% 
+  filter(!is.na(ugs)) %>% 
+  ggpairs()
+```
+
+Looking at the correlations, it seems like nugv, nlpg and gnp_agriculture are the most correlated variables with ugs, and pg, ndgv and pu are also highly correlated. These correlation levels will be useful when we need to introduce independent variables to the model.
+
+# 4. Forecasting with Regression
+
+## 4.1. Defining Trend, Seasonality and Lagged Variables and Trying Regression Models Each Time
+
+### 4.1.1. Modeling only with Trend
+
+```{r}
+data <- data %>% 
+  mutate(
+    trend = 1:nrow(data)
+  )
+
+data %>% slice_head(n=5)
+```
+
+```{r}
+lm1 <- lm(ugs~trend, data=data)
+summary(lm1)
+```
+
+According to the output above, trend variable is highly significant, but R-squared value is small, so the model can and should be improved.
+
+```{r}
+checkresiduals(lm1)
+```
+
+Looking at the residuals line graph, it is hard to say that they are independent. A "zigzag" pattern can be seen. So, it can be said that there is still room for explaining the outcome variable more with the model. Also, the autocorrelation function indicates that at lags 4 and 8, there are high positive autocorrelation, and at lags 2 and 6 there are high negative autocorrelation. This is in line with the previous observation of 4 period seasonality. Also, the high autocorrelation at lag 2 itself hints that using a 2-step lagged variable may be beneficial.
+
+### 4.1.2. Adding Seasonality to the Model
+
+```{r}
+data <- data %>% 
+  mutate(
+    quarter_in_year = as.factor(rep(1:4, times=nrow(data)/4))
+  )
+
+data %>% slice_head(n=5)
+```
+
+```{r}
+lm2 <- lm(ugs ~ -1 + trend + quarter_in_year, data=data)
+summary(lm2)
+```
+
+I decided not to include intercept, so that the effects of all quarters can be visible. And effects of all quarters look significant. R-squared and adjusted R-squared values also have significantly improved comparing to previous model.
+
+```{r}
+checkresiduals(lm2)
+```
+
+In the autocorrelation graph above, it can be seen that the autocorrelation levels at many lags have been reduced a lot. The relatively high autocorrelation values may be indicating that adding one and/or two step lagged variables may improve the model performance.
+
+### 4.1.3. Adding Lagged Variables to the Model
+
+```{r}
+data <- data %>% 
+  mutate(
+    lagged_1 = lag(ugs),
+    lagged_2 = lag(ugs, n=2)
+  )
+
+data
+```
+
+```{r}
+lm3 <- lm(ugs ~ -1+trend+quarter_in_year+lagged_2, data=data)
+summary(lm3)
+```
+
+```{r}
+checkresiduals(lm3)
+```
+
+### 4.1.4. Adding Independent Variables
+
+I chose the highly correlated variables to add to the model. 
+
+```{r}
+lm4 <- lm(ugs ~ -1+trend+quarter_in_year+lagged_2+nugv+nlpg+pg+ndgv+pu, data=data)
+summary(lm4)
+```
+
+```{r}
+checkresiduals(lm4)
+```
+
+# 5. Model Selection
+
+I chose the last model (lm4), because it includes trend, seasonality and lag effects, which were added according to the patterns in the ouputs of autocorrelation plots, and significant independent variables. Additionally, adjusted R-squared, which is a statistic that penalizes adding extra variables, did not decrease during this steps. As a final step for checking the model quality, we can predict using training data, which is already included in the model, and test data, which is completely new to the model, plot these predictions, and check if they overlap. 
+
+# 6. Forecasting with Final Model
+
+```{r}
+data$lagged_2[31] <- predict(lm4, data[29,])
+data$lagged_2[32] <- predict(lm4, data[30,])
+
+predicted <- predict(lm4, data)
+predicted
+```
+
+```{r}
+ggplot(data, aes(x=data$yearquarter)) + 
+  geom_line(aes(y=predicted, color="red")) +
+  geom_line(aes(y=data$ugs, color="blue"))
+```
+
+# 7. Conclusion
+
+The unleaded gasoline price levels have been modeled using trend, quarterly seasonality, 2-quarter lag variable and some other significant independent variables. Effects of these variables are all significant, in other words, none of them is unnecessary. Additionally, thanks to the simplicity of the linear regression, these effects are easy to explain/interpret. This model fits the data that it was trained on pretty well, and it is capable of making reasonable-looking predictions for the new data that it was not trained on, even though we did not have the chance to confirm the quality of these predictions.
