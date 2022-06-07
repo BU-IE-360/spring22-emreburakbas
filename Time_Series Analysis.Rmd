@@ -1,0 +1,237 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+require(data.table)
+require(tidyverse)
+require(lubridate)
+require(forecast)
+require(GGally)
+require(RcppRoll)
+require(skimr)
+require(zoo)
+require(urca)
+```
+
+```{r}
+weather_data <- read.csv("./data/long_weather.csv")
+weather_data <- data.table(weather_data)
+weather_data <- dcast(weather_data,
+                      date + hour ~ variable + lat + lon,
+                      value.var = "value")
+weather_data[,datetime:=ymd(date) + dhours(hour)]
+weather_data <- subset(weather_data, select = -c(date, hour))
+head(weather_data)
+```
+
+```{r}
+prod_data <- read.csv("./data/production.csv")
+prod_data <- data.table(prod_data)
+prod_data[,datetime:=ymd(date) + dhours(hour)]
+prod_data <- subset(prod_data, select = -c(date))
+data <- left_join(x     = prod_data,
+                  y     = weather_data,
+                  by    = "datetime")
+tail(data, 20)
+```
+
+```{r}
+skim(data)
+```
+
+```{r}
+tail(data, 100)
+```
+
+
+```{r}
+ggplot(data, aes(x = datetime, y = production)) +
+    geom_line()
+```
+
+## Stationarity Check
+
+```{r}
+time_window <- 720
+mean_series <- roll_mean(data$production, time_window, align='left')
+var_series <- roll_var(data$production, time_window, align='left')
+autocor_series <- rollapply(data$production, width=time_window, FUN=acf, lag.max=1, type="correlation", plot=FALSE)
+autocor_series <- unlist(autocor_series[, 1])
+autocor_series <- autocor_series[c(FALSE, TRUE)]
+```
+
+```{r}
+plot(mean_series,
+     type = 'l',
+     col = 'red',
+     xlab = "time (t)",
+     ylab = "Rolling Mean",
+     main = "Mean series")
+
+plot(var_series,
+     type = 'l',
+     col = 'red',
+     xlab = "time (t)",
+     ylab = "Rolling Variance",
+     main = "Variance series")
+
+plot(autocor_series,
+     type = 'l',
+     col = 'red',
+     xlab = "time (t)",
+     ylab = "Rolling ACF",
+     main = "Autocorrelation (lag 1) series")
+```
+
+KPSS Unit Root Test
+
+```{r}
+summary(ur.kpss(data$production))
+```
+
+Very high value, definitely non-stationary
+
+```{r eval=FALSE}
+Box.test(data$production, type="Ljung-Box")
+```
+
+```{r}
+acf(data$production)
+```
+
+```{r}
+pacf(data$production)
+```
+
+## 24-lag differencing
+
+```{r}
+data[, lag_24:=production-shift(production, 24)]
+tail(data, 30)
+```
+
+```{r}
+ggplot(data, aes(x = datetime, y = lag_24)) +
+    geom_line()
+```
+
+
+```{r}
+time_window <- 720
+mean_series <- roll_mean(data$lag_24, time_window, align='left')
+var_series <- roll_var(data$lag_24, time_window, align='left')
+autocor_series <- rollapply(data$lag_24[!is.na(data$lag_24)], width=time_window, FUN=acf, lag.max=1, type="correlation", plot=FALSE)
+autocor_series <- unlist(autocor_series[, 1])
+autocor_series <- autocor_series[c(FALSE, TRUE)]
+```
+
+```{r}
+plot(mean_series,
+     type = 'l',
+     col = 'red',
+     xlab = "time (t)",
+     ylab = "Rolling Mean",
+     main = "Mean series")
+
+plot(var_series,
+     type = 'l',
+     col = 'red',
+     xlab = "time (t)",
+     ylab = "Rolling Variance",
+     main = "Variance series")
+
+plot(autocor_series,
+     type = 'l',
+     col = 'red',
+     xlab = "time (t)",
+     ylab = "Rolling ACF",
+     main = "Autocorrelation (lag 1) series")
+```
+
+```{r}
+summary(ur.kpss(data$lag_24))
+```
+
+```{r}
+acf(data[!is.na(data$lag_24), lag_24])
+```
+
+```{r}
+pacf(data[!is.na(data$lag_24), lag_24])
+```
+
+Decomposition
+
+```{r}
+prod_24_ts_dc <- decompose(ts(data$production, frequency=24))
+plot(prod_24_ts_dc)
+```
+
+## ARIMA Model with 24 lags
+
+```{r}
+fitted <- auto.arima(data$lag_24, seasonal=F, trace=T, stepwise=F, approximation=F)
+```
+
+```{r}
+fitted
+```
+
+```{r}
+head(data - shift(data, 24), 50)
+```
+
+
+```{r}
+data_24_lag <- data - shift(data, 24)
+data_24_lag <- data_24_lag[!is.na(data_24_lag$lag_24)]
+data_24_lag_mat <- data.matrix(subset(data_24_lag, select = -c(hour, production, datetime, lag_24)))
+str(data_24_lag_mat)
+```
+
+```{r}
+str(data$lag_24)
+```
+
+```{r}
+head(data, 50)
+```
+
+
+## ARIMAX Model with 24 lags
+
+```{r}
+fitted_arimax <- auto.arima(data[c(rep(FALSE, 48), rep(TRUE, nrow(data_24_lag))), lag_24], xreg=data_24_lag_mat, seasonal=F, trace=T, stepwise=F, approximation=F)
+```
+
+### Making Predictions for the Training Period
+
+### Making Predictions for the Test Period
+
+```{r}
+test_weather_data <- read.csv("./data/2022-06-05_weather.csv")
+test_weather_data <- data.table(test_weather_data)
+test_weather_data <- dcast(test_weather_data,
+                      date + hour ~ variable + lat + lon,
+                      value.var = "value")
+test_weather_data[,datetime:=ymd(date) + dhours(hour)]
+test_weather_data <- subset(test_weather_data, select = -c(date, hour))
+test_weather_data<-test_weather_data[(date(test_weather_data$datetime) > "2022-05-06") & (date(test_weather_data$datetime) < "2022-06-04")]
+test_weather_data
+```
+
+```{r}
+prod_data <- read.csv("./data/production.csv")
+prod_data <- data.table(prod_data)
+prod_data[,datetime:=ymd(date) + dhours(hour)]
+prod_data <- subset(prod_data, select = -c(date))
+data <- left_join(x     = prod_data,
+                  y     = weather_data,
+                  by    = "datetime")
+tail(data, 20)
+```
+
